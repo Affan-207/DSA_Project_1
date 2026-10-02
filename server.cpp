@@ -216,18 +216,61 @@ struct PendingPatch
 // PASS 0x0: READING source.bin + VALIDITY CHECK
 bool readSourceLine(ifstream &in, string &out)
 {
+    while (getline(in, out);) {
+
+        if (!out.empty() ) return true;
+
+    }
+    return false;
     // reads the next nonblank line
 }
 string firstWord(const string &line)
 {
+    int idx = line.find(' ');
+
+    return line.substr(0, idx);
     // returns first word from the input string
 }
 string secondWord(const string &line)
 {
+    int idx1 = line.find(" ");
+
+    int idx2 = line.find(" ", idx1 + 1);
+
+    return line.substr(idx1 + 1, idx2 - idx1 - 1); 
+    
     // returns the second word
 }
 bool validateProgram(const char *sourcePath)
 {
+    ifstream fin(sourcePath);
+
+    if (!fin) return false;
+    else {
+        bool inside_func = false;
+        bool main_exists = false;
+        string line;
+
+        while (readSourceLine(fin, line)) {
+            if (firstWord(line) == "func") {
+                if (inside_func = true) {
+                    return false; // wwe aint treating nested functions
+                }
+
+                inside_func = true;
+
+                if (secondWord(line) == "main") main_exists = true;
+            }
+            else if (firstWord(line) == "func_end") {
+                if (inside_func == false) return false;
+
+                inside_func = false;
+            }
+        }
+        return (inside_func == false && main_exists == true);
+    }
+
+
     // for each func defined there should be exactly one func_end and no nested funcs allowed - 
 }
 
