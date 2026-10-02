@@ -52,25 +52,22 @@ public:
     void push(const T &val)
     {
         if (count >= MAX_STACK_DEPTH) {
-            // print error 
-            return;
+            throw runtime_error("Stack Full");
         }
         else {
-            Node* newNode = new Node(val);
+            Node* newNode = new Node();
             newNode->data = val;
             newNode->next = top;
             top = newNode;
             count++;
-                return;
         }
 
         // pushes the value on the stack if max limit is not reached yet.
     }
     T pop()
     {
-        if (Empty()) {
-            // print error handling
-            return;
+        if (isEmpty()) {
+            throw runtime_error("Stack Empty");
         }
         else {
             T val = top->data;
@@ -84,9 +81,8 @@ public:
     }
     T &peek()
     {
-        if (Empty()) {
-            // print error handling
-            return;
+        if (isEmpty()) {
+            throw runtime_error("Stack Empty");
         }
 
         return top->data;
@@ -134,16 +130,37 @@ public:
     // Implement these functions
     Timeline()
     {
+        head = tail = nullptr;
+        stepCount = 0;
     }
     void record(Snapshot *s)
     {
+
+        TimelineNode* new_node = new TimelineNode();
+        new_node->next = nullptr;
+        new_node->prev = nullptr;
+        new_node->data = s;
+
+        if (head==nullptr) {
+            head = tail = new_node;
+        }
+        else {
+            tail->next = new_node;
+            new_node->prev = tail;
+            tail = new_node;
+        }
+        stepCount++;
+
         // add record in the timeline
     }
     TimelineNode *begin()
     {
+        return head;
+
     }
     int32_t getStepCount()
     {
+        return stepCount;
     }
 };
 
