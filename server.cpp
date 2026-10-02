@@ -1,6 +1,6 @@
-/// ======================= TIME-TRAVEL DEBUGGER - SERVER TEMPLATE =======================
+// ======================= TIME-TRAVEL DEBUGGER - SERVER TEMPLATE =======================
 
-// Pipeline this file implements, top to bottom:
+/// Pipeline this file implements, top to bottom:
 //   0. Receive  -- stream the client's .trace bytes straight to source.bin on disk
 //   1. Pass 0X0   -- validity check (FUNC/FUNC_END matching)
 //   2. Pass 0X1   -- resolve(): copy EVERY source line into resolve.bin as [offset][size][string], then patch CALL targets.
