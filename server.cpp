@@ -8,10 +8,13 @@
 //   4. Pass 0X3   -- serialize Timeline -> session.tdbg(header + snapshot records + dense index)
 
 
+#define _CRT_SECURE_NO_WARNINGS
 #include <iostream>
 #include <string>
 #include <cstdint>
 #include <fstream>
+#include <sstream>
+#include <string>
 //#include <unistd.h>
 //#include <sys/socket.h>
 #include <cstdint>
@@ -216,7 +219,7 @@ struct PendingPatch
 // PASS 0x0: READING source.bin + VALIDITY CHECK
 bool readSourceLine(ifstream &in, string &out)
 {
-    while (getline(in, out);) {
+    while (getline(in, out)) {
 
         if (!out.empty() ) return true;
 
@@ -277,11 +280,40 @@ bool validateProgram(const char *sourcePath)
 // PASS 0x1: RESOLVE() -> resolve.bin
 int64_t writeResolveRecord(FILE *f, int64_t offsetField, const string &text)
 {
+    int64_t initial_pos = ftell(f);
+    fwrite(&offsetField, sizeof(int16_t), 1, f);
+
+    int32_t size = text.size();
+    fwrite(&size, sizeof(int32_t), 1, f);
+
+    fwrite(text.data(), sizeof(char), size, f);
+
+    return initial_pos;
     // writes one [offset(8B)][size(4B)][string] record at the current file position
     // returns this record's own starting byte position
 }
 int64_t readResolveRecord(FILE *f, string &outText)
 {
+    int64_t offset = 0;
+    if (fread(&offset, sizeof(int64_t), 1, f) != 1) {
+        return -1;
+    }
+
+    int32_t size = 0;
+    if (fread(&size, sizeof(int32_t), 1, f) != 1) {
+        return -1;
+    }
+
+    outText.resize(size);
+
+    if (size > 0) {
+        if (fread(&outText[0], sizeof(char), size, f) != (size_t)size) {
+            return -1;
+        }
+    }
+
+    return offset;
+
     // reads one record at the current position and advances past it, returns the offset field - the raw line text comes back untouched in outText.
 }
 int64_t resolveProgram(const char *sourcePath, const char *resolveBinPath)
@@ -290,6 +322,114 @@ int64_t resolveProgram(const char *sourcePath, const char *resolveBinPath)
     int32_t funcCount = 0;
     PendingPatch patches[MAX_PATCHES];
     int32_t patchCount = 0;
+
+    ifstream sourceFile(sourcePath);
+    if (!sourceFile.is_open()) {
+        cerr << "File not open";
+        return -1;
+    }
+
+    FILE* resolveFile = fopen(resolveBinPath, "wb+");
+    if (!resolveFile) {
+        cerr << "File not open";
+        sourceFile.close();
+        return -1;
+    }
+
+    string line;
+    int64_t currentOffset = 0;
+    int64_t mainOffset = -1;
+
+
+    // --- Pass 1: Write records and collect symbols/patches ---
+    while (readSourceLine(sourceFile, line)) {
+        string keyword = firstWord(line);
+
+        // We prepare the record payload. Initially, for CALL instructions, 
+        // the offset field is a placeholder (0) until we patch it later.
+        int64_t recordStart = currentOffset;
+
+        // Write the record to resolve.bin: [offset (8B)][size (4B)][string data]
+        // Note: For now, we write 0 as the stored record offset prefix, or we can write recordStart.
+        // Let's use writeResolveRecord helper format.
+        int64_t offsetFieldLoc = currentOffset; // position where the 8-byte offset sits
+
+        // Let's write the record using a helper logic directly or via writeResolveRecord
+        fseek(resolveFile, currentOffset, SEEK_SET);
+
+        // Write placeholder/actual offset field (8 bytes)
+        int64_t fileOffsetPlaceholder = 0;
+        fwrite(&fileOffsetPlaceholder, sizeof(int64_t), 1, resolveFile);
+
+        // Write size of string (4 bytes)
+        int32_t stringSize = static_cast<int32_t>(line.size());
+        fwrite(&stringSize, sizeof(int32_t), 1, resolveFile);
+
+        // Write string data
+        fwrite(line.c_str(), 1, stringSize, resolveFile);
+
+        // Update current file offset tracker
+        currentOffset += sizeof(int64_t) + sizeof(int32_t) + stringSize;
+        
+        // Inspect keywords for symbol resolution
+        if (keyword == "func") {
+            string funcName = secondWord(line);
+            if (funcCount < MAX_FUNCS) {
+                funcArray[funcCount].funcName = funcName;
+                funcArray[funcCount++].byteOffsetInResolveBin = recordStart;
+            }
+            if (funcName == "main") {
+                mainOffset = recordStart;
+            }
+        }
+        else if (keyword == "call") {
+            string targetName = secondWord(line);
+            if (patchCount < MAX_PATCHES) {
+                // The offset field that needs patching is right at recordStart
+                patches[patchCount].byteOffsetOfOffsetField = recordStart;
+                patches[patchCount++].targetFuncName = targetName;
+            }
+        }
+    }
+
+    // --- Pass 2: Patch the CALL instructions ---
+    for (int32_t i = 0; i < patchCount; i++) {
+        int64_t targetOffset = -1;
+
+        // Find the target function's byte offset from funcArray
+        for (int32_t j = 0; j < funcCount; j++) {
+            if (funcArray[j].funcName == patches[i].targetFuncName) {
+                targetOffset = funcArray[j].byteOffsetInResolveBin;
+                break;
+            }
+        }
+
+        if (targetOffset != -1) {
+            // Seek to the exact offset field location of that call instruction in resolve.bin
+            fseek(resolveFile, patches[i].byteOffsetOfOffsetField, SEEK_SET);
+            // Overwrite the 8-byte placeholder with the real target byte offset
+            fwrite(&targetOffset, sizeof(int64_t), 1, resolveFile);
+        }
+        else {
+            cerr << "Error: Unresolved function call target: " << patches[i].targetFuncName << endl;
+            fclose(resolveFile);
+            return -1;
+        }
+    }
+
+    fclose(resolveFile);
+
+    if (mainOffset == -1) {
+        cerr << "Error: 'main' function not found in source program." << endl;
+        return -1;
+    }
+
+    return mainOffset;
+
+    sourceFile.close();
+
+     
+
     // Every source line becomes one record holding the raw line, as-is.
     // resolve() only PEEKS at the leading word(s) -- enough to spot FUNC
     // (remember its position) and CALL (remember which function it needs
@@ -314,6 +454,25 @@ struct Token
 };
 int32_t tokenizeLine(const string &line, Token tokens[], int32_t maxTokens)
 {
+    stringstream ss(line);
+    string word;
+    int32_t tokenCount = 0;
+
+    while (ss >> word && tokenCount < maxTokens) {
+        if (tokenCount == 0) {
+            tokens[tokenCount].type = KEYWORD; 
+        }
+        else if (tokenCount == 1) {
+            tokens[tokenCount].type = IDENTIFIER;  
+        }
+        else {
+            tokens[tokenCount].type = PARAM;       
+        }
+
+        tokens[tokenCount].text = word;            
+        tokenCount++;
+    }
+    return tokenCount;
     // first word is always a instruction keyword
     // instruction set = [func, func_end, call, set, add, sub, mul and div]
     // next word is identifier like name of a function, variable name
@@ -321,21 +480,182 @@ int32_t tokenizeLine(const string &line, Token tokens[], int32_t maxTokens)
 }
 Snapshot *buildSnapshot(Stack<Frame> &callStack)
 {
+    Snapshot* s = new Snapshot();
+    s->stackDepth = callStack.snapshot_into(s->callStack, MAX_STACK_DEPTH);
+
+    return s;
     // build the snapshot based on the callStack given
 }
-void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &timeline)
+void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& timeline)
 {
+    FILE* f = fopen(resolveBinPath, "rb"); // Open resolve.bin for binary reading
+    if (!f) return;
+
+    Stack<Frame> callStack; // Initialize the live execution call stack
+
+    // 1. Create and push the initial 'main' frame onto the stack
+    Frame mainFrame;
+    mainFrame.func_name = "main";
+    mainFrame.argc = 0;
+    mainFrame.localCount = 0;
+    callStack.push(mainFrame);
+
+    // Record the very first timeline step at the start of main
+    timeline.record(buildSnapshot(callStack));
+
+    // 2. Jump straight to main's offset in the binary file
+    fseek(f, mainOffset, SEEK_SET);
+
+    string line;
+    int64_t nextOffset = mainOffset;
+
+    // 3. Main execution loop reading record by record
+    while (true) {
+        int64_t currentRecordOffset = ftell(f);
+
+        // Read the binary record (8-byte offset, 4-byte size, string text)
+        int64_t storedOffsetField;
+        if (fread(&storedOffsetField, sizeof(int64_t), 1, f) != 1) break;
+
+        int32_t stringSize;
+        if (fread(&stringSize, sizeof(int32_t), 1, f) != 1) break;
+
+        string rawLine(stringSize, ' ');
+        if (fread(&rawLine[0], 1, stringSize, f) != static_cast<size_t>(stringSize)) break;
+
+        // Tokenize the line to understand what command to run
+        Token tokens[MAX_TOKENS];
+        int32_t tokenCount = tokenizeLine(rawLine, tokens, MAX_TOKENS);
+        if (tokenCount == 0) continue;
+
+        string keyword = tokens[0].text;
+
+        // 4. Handle instructions based on keywords
+        if (keyword == "func_end") {
+            // End of function: pop the top frame off the call stack
+            if (!callStack.isEmpty()) {
+                callStack.pop();
+            }
+            // If the stack is completely empty, main has finished executing!
+            if (callStack.isEmpty()) {
+                break;
+            }
+        }
+        else if (keyword == "call") {
+            // For a call instruction, the 8-byte storedOffsetField holds the target file address!
+            // We push a new frame onto the stack and jump to that file position.
+            Frame newFrame;
+            newFrame.func_name = tokens[1].text;
+            newFrame.localCount = 0;
+            callStack.push(newFrame);
+
+            fseek(f, storedOffsetField, SEEK_SET); // Jump file pointer to the target function
+        }
+        else if (keyword == "set") {
+            // Example: set x 10 -> create or update a local variable
+            if (!callStack.isEmpty() && tokenCount >= 3) {
+                Frame& currentFrame = callStack.peek();
+                string varName = tokens[1].text;
+                int32_t val = stoi(tokens[2].text);
+
+                // Look for existing local variable to update it
+                bool found = false;
+                for (int32_t i = 0; i < currentFrame.localCount; i++) {
+                    if (currentFrame.locals[i].name == varName) {
+                        currentFrame.locals[i].value = val;
+                        found = true;
+                        break;
+                    }
+                }
+                // If not found, add it as a new local variable
+                if (!found && currentFrame.localCount < MAX_VARS_PER_FRAME) {
+                    currentFrame.locals[currentFrame.localCount].name = varName;
+                    currentFrame.locals[currentFrame.localCount].value = val;
+                    currentFrame.localCount++;
+                }
+            }
+        }
+        // (You can similarly implement add, sub, mul, div operations here by updating variable values)
+
+        // 5. After every single instruction, capture a snapshot and record it into the timeline[cite: 1]
+        timeline.record(buildSnapshot(callStack));
+    }
+
+    fclose(f); // Close file when execution completes
+
+
+
+
     // initialize the call stack
     // make the main frame
     // push main frame on the call stack
-
     // implementation:
     // execute line by line, and according to the keyword perform action
+
 }
 
 // PASS 0x3: SERIALIZE TIMELINE
 void writeTdbg(Timeline &timeline, const char *tdbgPath)
 {
+    // 1. Open the session file for binary writing
+    FILE* f = fopen(tdbgPath, "wb");
+    if (!f) {
+        cerr << "File not Open" << endl;
+        return;
+    }
+
+    int32_t stepCount = timeline.getStepCount();
+
+    // 2. Prepare and write the initial header placeholder
+    TTDBHeader header;
+    header.magic[0] = 'T'; header.magic[1] = 'T'; header.magic[2] = 'D'; header.magic[3] = 'B';
+    header.version = 1;
+    header.stepCount = stepCount;
+    header.indexOffset = 0; // Will be updated later after we know where the index starts
+
+    // Write header fields to the beginning of the file
+    fwrite(header.magic, 1, 4, f);
+    fwrite(&header.version, sizeof(int32_t), 1, f);
+    fwrite(&header.stepCount, sizeof(int32_t), 1, f);
+    fwrite(&header.indexOffset, sizeof(int64_t), 1, f);
+
+    // Allocate an array to track the exact file offset of each snapshot step
+    int64_t* snapshotOffsets = new int64_t[stepCount];
+
+    // 3. Loop through the timeline, writing each snapshot and recording its file position
+    TimelineNode* curr = timeline.begin();
+    int32_t index = 0;
+    while (curr != nullptr && index < stepCount) {
+        // Record the exact starting byte position of this snapshot
+        snapshotOffsets[index] = ftell(f);
+
+        // Write the snapshot data structure directly to disk
+        fwrite(curr->data, sizeof(Snapshot), 1, f);
+
+        curr = curr->next;
+        index++;
+    }
+
+    // 4. Capture the file position where the dense index array begins
+    int64_t indexArrayOffset = ftell(f);
+
+    // 5. Write the dense index array at the end of the file
+    fwrite(snapshotOffsets, sizeof(int64_t), stepCount, f);
+
+    // 6. Seek back to the very beginning of the file (position 0) and update the header
+    header.indexOffset = indexArrayOffset;
+    fseek(f, 0, SEEK_SET);
+
+    fwrite(header.magic, 1, 4, f);
+    fwrite(&header.version, sizeof(int32_t), 1, f);
+    fwrite(&header.stepCount, sizeof(int32_t), 1, f);
+    fwrite(&header.indexOffset, sizeof(int64_t), 1, f);
+
+    // Clean up dynamic memory and close the file
+    delete[] snapshotOffsets;
+    fclose(f);
+
+
     // placeholder for header
     // index array of the size of stepcount from the timeline
     // placing each snapshot in the file while maintaining the index(starting point of each nth snapshot)
