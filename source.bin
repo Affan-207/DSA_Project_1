@@ -1,3 +1,8 @@
+func foo
+set b 10
+func_end
+
 func main
-set a 10
+set a 5
+call foo
 func_end
